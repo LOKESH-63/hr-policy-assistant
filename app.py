@@ -24,16 +24,15 @@ st.caption("Answers are generated only from official HR policy documents")
 @st.cache_resource
 def load_rag_pipeline():
 
-    PDF_PATH = "PDF_PATH = "HR Policy Manual 2023 (8).pdf"
-"  # make sure this file exists in GitHub
+    PDF_PATH = "HR Policy Manual 2023 (8).pdf"
 
     if not os.path.exists(PDF_PATH):
         st.error("HR policy PDF file not found. Please contact the administrator.")
         st.stop()
 
-    # Load PDF
     loader = PyPDFLoader(PDF_PATH)
     documents = loader.load()
+
 
     # Split into chunks
     splitter = RecursiveCharacterTextSplitter(
