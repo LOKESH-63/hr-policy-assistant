@@ -22,12 +22,17 @@ st.caption("Answers are based only on official HR policy documents")
 # ------------------ LOAD RAG PIPELINE ------------------
 @st.cache_resource
 def load_rag_pipeline():
+    import os
 
-    # Load HR Policy PDF
-    loader = PyPDFLoader("Sample_HR_Policies.pdf")
+    PDF_PATH = "HR Policy Manual 2023 (8).pdf"  # or Sample_HR_Policies.pdf
+
+    if not os.path.exists(PDF_PATH):
+        st.error("HR policy PDF file not found. Please contact the administrator.")
+        st.stop()
+
+    loader = PyPDFLoader(PDF_PATH)
     documents = loader.load()
 
-    # Split into chunks
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=800,
         chunk_overlap=100
@@ -35,16 +40,13 @@ def load_rag_pipeline():
     chunks = splitter.split_documents(documents)
     texts = [chunk.page_content for chunk in chunks]
 
-    # Create embeddings
     embedder = SentenceTransformer("BAAI/bge-base-en-v1.5")
     embeddings = embedder.encode(texts)
 
-    # Store in FAISS
     dimension = embeddings.shape[1]
     index = faiss.IndexFlatL2(dimension)
     index.add(np.array(embeddings))
 
-    # Load LLM
     llm = pipeline(
         "text2text-generation",
         model="google/flan-t5-base",
@@ -52,9 +54,6 @@ def load_rag_pipeline():
     )
 
     return embedder, index, texts, llm
-
-
-embedder, index, texts, llm = load_rag_pipeline()
 
 
 # ------------------ ANSWER FUNCTION ------------------
