@@ -58,7 +58,7 @@ if os.path.exists(LOGO_PATH):
     logo = Image.open(LOGO_PATH)
     col1, col2 = st.columns([1, 6])
     with col1:
-        st.image(logo, width=70)
+        st.image(logo, width=65)
     with col2:
         st.markdown("## **Enterprise RAG-based HR Chatbot**")
 else:
@@ -104,7 +104,10 @@ embedder, index, texts, llm = load_pipeline()
 
 # ---------------- GREETING HANDLER ----------------
 def is_greeting(text):
-    greetings = ["hi", "hello", "hey", "good morning", "good afternoon", "good evening"]
+    greetings = [
+        "hi", "hello", "hey",
+        "good morning", "good afternoon", "good evening"
+    ]
     return text.lower().strip() in greetings
 
 # ---------------- RAG QUERY FUNCTION ----------------
@@ -112,30 +115,35 @@ def answer_query(question):
     q_emb = embedder.encode([question])
     _, idx = index.search(np.array(q_emb), k=3)
 
-    # Use only top 2 chunks to avoid policy dumping
+    # Use only top 2 chunks to avoid dumping policy text
     context = " ".join([texts[i] for i in idx[0][:2]])
 
     prompt = f"""
 You are an HR assistant.
 
-Answer the question in clear, simple, professional language.
-Do NOT copy policy clauses.
-Summarize the answer in 2–4 sentences.
-Use ONLY the information from the HR policy.
+Answer the question in clear, professional bullet points.
+Do NOT copy policy clauses word by word.
+Use ONLY information from the HR policy.
+Limit the answer to 3–5 short bullet points.
 
-If the answer is not available, say:
-"I checked the HR policy document, but this information is not mentioned."
+If the answer is not available, respond with:
+- This information is not mentioned in the HR policy document.
 
 Policy Content:
 {context}
 
 Question:
 {question}
+
+Format:
+- Point 1
+- Point 2
+- Point 3
 """
 
     response = llm(
         prompt,
-        max_length=120,
+        max_length=140,
         temperature=0.1
     )[0]["generated_text"]
 
@@ -149,7 +157,7 @@ if question:
     if is_greeting(question):
         st.info(
             "Hello 👋 I’m your HR Policy Assistant.\n\n"
-            "You can ask me questions like:\n"
+            "You can ask questions like:\n"
             "- What is the leave policy?\n"
             "- What is the notice period?\n"
             "- How many casual leaves are allowed?"
