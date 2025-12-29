@@ -3,6 +3,7 @@ import faiss
 import numpy as np
 import os
 from PIL import Image
+import re
 
 from sentence_transformers import SentenceTransformer
 from transformers import AutoTokenizer, AutoModelForSeq2SeqLM, pipeline
@@ -38,10 +39,7 @@ def login():
         submit = st.form_submit_button("Login")
 
     if submit:
-        username = username.strip()
-        password = password.strip()
-
-        if username in USERS and USERS[username]["password"] == password:
+        if username.strip() in USERS and USERS[username.strip()]["password"] == password.strip():
             st.session_state.logged_in = True
             st.session_state.username = username
             st.session_state.role = USERS[username]["role"]
@@ -104,27 +102,35 @@ embedder, index, texts, llm = load_pipeline()
 
 # ---------------- GREETING HANDLER ----------------
 def is_greeting(text):
-    greetings = [
-        "hi", "hello", "hey",
-        "good morning", "good afternoon", "good evening"
-    ]
+    greetings = ["hi", "hello", "hey", "good morning", "good afternoon", "good evening"]
     return text.lower().strip() in greetings
+
+# ---------------- BULLET FORMATTER (NEW) ----------------
+def ensure_bullets(text):
+    # If already bullet points, return as-is
+    if "-" in text.strip().splitlines()[0]:
+        return text
+
+    # Otherwise convert sentences to bullets
+    sentences = re.split(r"\.\s+", text)
+    bullets = [f"- {s.strip()}" for s in sentences if len(s.strip()) > 5]
+    return "\n".join(bullets[:5])
 
 # ---------------- RAG QUERY FUNCTION ----------------
 def answer_query(question):
     q_emb = embedder.encode([question])
     _, idx = index.search(np.array(q_emb), k=3)
 
-    # Use only top 2 chunks to avoid dumping policy text
+    # Only top 2 chunks
     context = " ".join([texts[i] for i in idx[0][:2]])
 
     prompt = f"""
 You are an HR assistant.
 
-Answer the question in clear, professional bullet points.
-Do NOT copy policy clauses word by word.
-Use ONLY information from the HR policy.
-Limit the answer to 3–5 short bullet points.
+Answer ONLY in clear bullet points.
+Do NOT copy policy clauses.
+Use simple professional language.
+Limit to 3–5 short bullet points.
 
 If the answer is not available, respond with:
 - This information is not mentioned in the HR policy document.
@@ -141,13 +147,13 @@ Format:
 - Point 3
 """
 
-    response = llm(
+    raw_response = llm(
         prompt,
-        max_length=140,
+        max_length=160,
         temperature=0.1
     )[0]["generated_text"]
 
-    return response
+    return ensure_bullets(raw_response)
 
 # ---------------- CHAT UI ----------------
 st.subheader("💬 Ask HR Policy Question")
@@ -157,10 +163,10 @@ if question:
     if is_greeting(question):
         st.info(
             "Hello 👋 I’m your HR Policy Assistant.\n\n"
-            "You can ask questions like:\n"
+            "Try questions like:\n"
             "- What is the leave policy?\n"
             "- What is the notice period?\n"
-            "- How many casual leaves are allowed?"
+            "- What is the WFH policy?"
         )
     else:
         answer = answer_query(question)
