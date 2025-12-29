@@ -2,8 +2,8 @@ import streamlit as st
 import faiss
 import numpy as np
 import os
-from PIL import Image
 import re
+from PIL import Image
 
 from sentence_transformers import SentenceTransformer
 from transformers import AutoTokenizer, AutoModelForSeq2SeqLM, pipeline
@@ -32,7 +32,6 @@ if "logged_in" not in st.session_state:
 
 def login():
     st.title("🔐 Login – HR Policy Assistant")
-
     with st.form("login_form"):
         username = st.text_input("Username")
         password = st.text_input("Password", type="password")
@@ -41,8 +40,7 @@ def login():
     if submit:
         if username.strip() in USERS and USERS[username.strip()]["password"] == password.strip():
             st.session_state.logged_in = True
-            st.session_state.username = username
-            st.session_state.role = USERS[username]["role"]
+            st.session_state.role = USERS[username.strip()]["role"]
             st.rerun()
         else:
             st.error("Invalid credentials")
@@ -51,7 +49,7 @@ if not st.session_state.logged_in:
     login()
     st.stop()
 
-# ---------------- HEADER WITH LOGO ----------------
+# ---------------- HEADER ----------------
 if os.path.exists(LOGO_PATH):
     logo = Image.open(LOGO_PATH)
     col1, col2 = st.columns([1, 6])
@@ -79,10 +77,7 @@ def load_pipeline():
     loader = PyPDFLoader(PDF_PATH)
     documents = loader.load()
 
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=800,
-        chunk_overlap=100
-    )
+    splitter = RecursiveCharacterTextSplitter(chunk_size=800, chunk_overlap=100)
     chunks = splitter.split_documents(documents)
     texts = [c.page_content for c in chunks]
 
@@ -100,40 +95,42 @@ def load_pipeline():
 
 embedder, index, texts, llm = load_pipeline()
 
-# ---------------- GREETING HANDLER ----------------
+# ---------------- HELPERS ----------------
 def is_greeting(text):
-    greetings = ["hi", "hello", "hey", "good morning", "good afternoon", "good evening"]
-    return text.lower().strip() in greetings
+    return text.lower().strip() in [
+        "hi", "hello", "hey",
+        "good morning", "good afternoon", "good evening"
+    ]
 
-# ---------------- BULLET FORMATTER (NEW) ----------------
 def ensure_bullets(text):
-    # If already bullet points, return as-is
-    if "-" in text.strip().splitlines()[0]:
-        return text
+    lines = [l.strip() for l in text.splitlines() if l.strip()]
+    if lines and lines[0].startswith("-"):
+        return "\n".join(lines[:5])
 
-    # Otherwise convert sentences to bullets
     sentences = re.split(r"\.\s+", text)
     bullets = [f"- {s.strip()}" for s in sentences if len(s.strip()) > 5]
     return "\n".join(bullets[:5])
 
-# ---------------- RAG QUERY FUNCTION ----------------
+# ---------------- RAG QUERY ----------------
 def answer_query(question):
     q_emb = embedder.encode([question])
-    _, idx = index.search(np.array(q_emb), k=3)
+    distances, idx = index.search(np.array(q_emb), k=5)
 
-    # Only top 2 chunks
-    context = " ".join([texts[i] for i in idx[0][:2]])
+    context = " ".join([texts[i] for i in idx[0][:3]])
+
+    # Keyword fallback for section titles (e.g., Grievance)
+    if distances[0][0] > 1.6 and not any(
+        kw in context.lower() for kw in question.lower().split()
+    ):
+        return "- This information is not mentioned in the HR policy document."
 
     prompt = f"""
 You are an HR assistant.
 
 Answer ONLY in clear bullet points.
-Do NOT copy policy clauses.
-Use simple professional language.
+Do NOT copy policy clauses word by word.
+Use professional, simple language.
 Limit to 3–5 short bullet points.
-
-If the answer is not available, respond with:
-- This information is not mentioned in the HR policy document.
 
 Policy Content:
 {context}
@@ -147,13 +144,13 @@ Format:
 - Point 3
 """
 
-    raw_response = llm(
-        prompt,
-        max_length=160,
-        temperature=0.1
-    )[0]["generated_text"]
+    raw = llm(prompt, max_length=160, temperature=0.1)[0]["generated_text"]
+    clean = ensure_bullets(raw)
 
-    return ensure_bullets(raw_response)
+    if clean.lower().strip() in ["- point 1", "point 1", ""]:
+        return "- This information is not mentioned in the HR policy document."
+
+    return clean
 
 # ---------------- CHAT UI ----------------
 st.subheader("💬 Ask HR Policy Question")
@@ -163,11 +160,10 @@ if question:
     if is_greeting(question):
         st.info(
             "Hello 👋 I’m your HR Policy Assistant.\n\n"
-            "Try questions like:\n"
+            "You can ask:\n"
             "- What is the leave policy?\n"
-            "- What is the notice period?\n"
-            "- What is the WFH policy?"
+            "- What is the WFH policy?\n"
+            "- What is the Grievance Redressal Policy?"
         )
     else:
-        answer = answer_query(question)
-        st.success(answer)
+        st.success(answer_query(question))
