@@ -1,132 +1,159 @@
-import os
 import streamlit as st
 import faiss
 import numpy as np
+import os
+from PIL import Image
 
 from sentence_transformers import SentenceTransformer
-from transformers import pipeline
+from transformers import AutoTokenizer, AutoModelForSeq2SeqLM, pipeline
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
-
 # ---------------- PAGE CONFIG ----------------
-st.set_page_config(
-    page_title="HR Policy Assistant",
-    page_icon="🏢",
-    layout="centered"
-)
+st.set_page_config(page_title="HR Policy Chatbot", page_icon="🏢")
 
-st.title("🏢 HR Policy Assistant")
-st.caption("Answers are generated only from official HR policy documents")
+# ---------------- CONSTANTS ----------------
+PDF_FILE = "Sample_HR_Policy_Document.pdf"
+LOGO_FILE = "nexus_iq_logo.png"
 
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+PDF_PATH = os.path.join(BASE_DIR, PDF_FILE)
+LOGO_PATH = os.path.join(BASE_DIR, LOGO_FILE)
+
+# ---------------- LOGIN SYSTEM ----------------
+USERS = {
+    "employee": {"password": "employee123", "role": "Employee"},
+    "hr": {"password": "hr123", "role": "HR"}
+}
+
+if "logged_in" not in st.session_state:
+    st.session_state.logged_in = False
+
+def login():
+    st.title("🔐 Login – HR Policy Assistant")
+
+    with st.form("login_form"):
+        username = st.text_input("Username")
+        password = st.text_input("Password", type="password")
+        submit = st.form_submit_button("Login")
+
+    if submit:
+        username = username.strip()
+        password = password.strip()
+
+        if username in USERS and USERS[username]["password"] == password:
+            st.session_state.logged_in = True
+            st.session_state.username = username
+            st.session_state.role = USERS[username]["role"]
+            st.rerun()
+        else:
+            st.error("Invalid credentials")
+
+if not st.session_state.logged_in:
+    login()
+    st.stop()
+
+# ---------------- HEADER WITH LOGO ----------------
+if os.path.exists(LOGO_PATH):
+    logo = Image.open(LOGO_PATH)
+    col1, col2 = st.columns([1, 6])
+    with col1:
+        st.image(logo, width=70)
+    with col2:
+        st.markdown("## **Enterprise RAG-based HR Chatbot**")
+else:
+    st.markdown("## **Enterprise RAG-based HR Chatbot**")
+
+st.caption(f"Logged in as: **{st.session_state.role}**")
+
+if st.button("Logout"):
+    st.session_state.logged_in = False
+    st.rerun()
+
+# ---------------- CHECK PDF ----------------
+if not os.path.exists(PDF_PATH):
+    st.error("❌ HR Policy PDF not found in repository root.")
+    st.stop()
 
 # ---------------- LOAD RAG PIPELINE ----------------
 @st.cache_resource
-def load_rag_pipeline():
-
-    PDF_PATH = "HR Policy Manual 2023 (8).pdf"
-
-    if not os.path.exists(PDF_PATH):
-        st.error("HR policy PDF file not found. Please contact the administrator.")
-        st.stop()
-
+def load_pipeline():
     loader = PyPDFLoader(PDF_PATH)
     documents = loader.load()
 
-
-    # Split into chunks
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=800,
         chunk_overlap=100
     )
     chunks = splitter.split_documents(documents)
-    texts = [chunk.page_content for chunk in chunks]
+    texts = [c.page_content for c in chunks]
 
-    # Create embeddings
     embedder = SentenceTransformer("BAAI/bge-base-en-v1.5")
     embeddings = embedder.encode(texts)
 
-    # Store in FAISS
-    dimension = embeddings.shape[1]
-    index = faiss.IndexFlatL2(dimension)
+    index = faiss.IndexFlatL2(embeddings.shape[1])
     index.add(np.array(embeddings))
 
-    # Load LLM
-    llm = pipeline(
-        "text2text-generation",
-        model="google/flan-t5-base",
-        max_new_tokens=200
-    )
+    tokenizer = AutoTokenizer.from_pretrained("google/flan-t5-base")
+    model = AutoModelForSeq2SeqLM.from_pretrained("google/flan-t5-base")
+    llm = pipeline("text2text-generation", model=model, tokenizer=tokenizer)
 
     return embedder, index, texts, llm
 
+embedder, index, texts, llm = load_pipeline()
 
-# Load everything once
-embedder, index, texts, llm = load_rag_pipeline()
+# ---------------- GREETING HANDLER ----------------
+def is_greeting(text):
+    greetings = ["hi", "hello", "hey", "good morning", "good afternoon", "good evening"]
+    return text.lower().strip() in greetings
 
+# ---------------- RAG QUERY FUNCTION ----------------
+def answer_query(question):
+    q_emb = embedder.encode([question])
+    _, idx = index.search(np.array(q_emb), k=3)
 
-# ---------------- ANSWER FUNCTION ----------------
-def get_answer(question, embedder, index, texts, llm):
+    # Use only top 2 chunks to avoid policy dumping
+    context = " ".join([texts[i] for i in idx[0][:2]])
 
-    # Convert question to embedding
-    query_embedding = embedder.encode([question])
-
-    # Retrieve top matching chunks
-    distances, indices = index.search(query_embedding, k=3)
-    context = " ".join([texts[i] for i in indices[0]])
-
-    # Polite fallback if answer not found
-    if context.strip() == "":
-        return (
-            "I checked the HR policy document, but this information is not mentioned. "
-            "Please reach out to the HR team for further clarification."
-        )
-
-    # Prompt
     prompt = f"""
 You are an HR assistant.
-Answer the question using ONLY the information provided below.
-If the answer is not present, say politely that it is not mentioned.
 
-Context:
+Answer the question in clear, simple, professional language.
+Do NOT copy policy clauses.
+Summarize the answer in 2–4 sentences.
+Use ONLY the information from the HR policy.
+
+If the answer is not available, say:
+"I checked the HR policy document, but this information is not mentioned."
+
+Policy Content:
 {context}
 
 Question:
 {question}
 """
 
-    response = llm(prompt)[0]["generated_text"]
+    response = llm(
+        prompt,
+        max_length=120,
+        temperature=0.1
+    )[0]["generated_text"]
+
     return response
 
-
 # ---------------- CHAT UI ----------------
-if "messages" not in st.session_state:
-    st.session_state.messages = []
-
-# Display chat history
-for msg in st.session_state.messages:
-    with st.chat_message(msg["role"]):
-        st.write(msg["content"])
-
-# User input
-question = st.chat_input("Ask your HR policy question...")
+st.subheader("💬 Ask HR Policy Question")
+question = st.text_input("Enter your question")
 
 if question:
-    st.session_state.messages.append(
-        {"role": "user", "content": question}
-    )
-
-    with st.chat_message("assistant"):
-        with st.spinner("Checking HR policies..."):
-            answer = get_answer(
-                question,
-                embedder,
-                index,
-                texts,
-                llm
-            )
-            st.write(answer)
-
-    st.session_state.messages.append(
-        {"role": "assistant", "content": answer}
-    )
+    if is_greeting(question):
+        st.info(
+            "Hello 👋 I’m your HR Policy Assistant.\n\n"
+            "You can ask me questions like:\n"
+            "- What is the leave policy?\n"
+            "- What is the notice period?\n"
+            "- How many casual leaves are allowed?"
+        )
+    else:
+        answer = answer_query(question)
+        st.success(answer)
