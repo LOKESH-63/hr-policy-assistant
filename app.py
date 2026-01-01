@@ -14,10 +14,14 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 
 # ---------------- PAGE CONFIG ----------------
-st.set_page_config(page_title="HR Policy Assistant", page_icon="🏢", layout="wide")
+st.set_page_config(
+    page_title="HR Policy Assistant",
+    page_icon="🏢",
+    layout="wide"
+)
 
 
-# ---------------- FILE PATHS ----------------
+# ---------------- PATHS ----------------
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 PDF_PATH = os.path.join(BASE_DIR, "Sample_HR_Policy_Document.pdf")
 LOGO_PATH = os.path.join(BASE_DIR, "nexus_iq_logo.png")
@@ -39,19 +43,20 @@ if "logged_in" not in st.session_state:
 # ---------------- LOGIN ----------------
 def login():
     st.title("🔐 Login – HR Policy Assistant")
-    with st.form("login"):
-        user = st.text_input("Username")
-        pwd = st.text_input("Password", type="password")
+
+    with st.form("login_form"):
+        username = st.text_input("Username")
+        password = st.text_input("Password", type="password")
         submit = st.form_submit_button("Login")
 
     if submit:
-        if user in USERS and USERS[user]["password"] == pwd:
+        if username in USERS and USERS[username]["password"] == password:
             st.session_state.logged_in = True
-            st.session_state.role = USERS[user]["role"]
-            st.session_state.user = user
+            st.session_state.user = username
+            st.session_state.role = USERS[username]["role"]
             st.rerun()
         else:
-            st.error("Invalid credentials")
+            st.error("❌ Invalid credentials")
 
 
 if not st.session_state.logged_in:
@@ -72,7 +77,7 @@ if st.button("Logout"):
     st.rerun()
 
 
-# ---------------- LOAD ANALYTICS ----------------
+# ---------------- ANALYTICS INIT ----------------
 if not os.path.exists(ANALYTICS_PATH):
     pd.DataFrame(
         columns=["timestamp", "user", "role", "question", "answered"]
@@ -95,27 +100,34 @@ def log_query(question, answered):
 @st.cache_resource
 def load_rag():
     loader = PyPDFLoader(PDF_PATH)
-    docs = loader.load()
+    documents = loader.load()
 
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=700,
         chunk_overlap=120
     )
-    chunks = splitter.split_documents(docs)
+    chunks = splitter.split_documents(documents)
     texts = [c.page_content for c in chunks]
 
-    embedder = SentenceTransformer(
-        "BAAI/bge-base-en-v1.5",
+    # ✅ SAFE EMBEDDINGS (NO ERROR)
+    embedder = SentenceTransformer("BAAI/bge-base-en-v1.5")
+    embeddings = embedder.encode(
+        texts,
+        convert_to_numpy=True,
         normalize_embeddings=True
     )
-    embeddings = embedder.encode(texts)
 
+    # ✅ COSINE SIMILARITY
     index = faiss.IndexFlatIP(embeddings.shape[1])
-    index.add(np.array(embeddings))
+    index.add(embeddings)
 
     tokenizer = AutoTokenizer.from_pretrained("google/flan-t5-base")
     model = AutoModelForSeq2SeqLM.from_pretrained("google/flan-t5-base")
-    llm = pipeline("text2text-generation", model=model, tokenizer=tokenizer)
+    llm = pipeline(
+        "text2text-generation",
+        model=model,
+        tokenizer=tokenizer
+    )
 
     return embedder, index, texts, llm
 
@@ -131,14 +143,20 @@ def ensure_bullets(text):
 
 
 def answer_query(question):
-    q_emb = embedder.encode([question], normalize_embeddings=True)
-    scores, idx = index.search(np.array(q_emb), k=5)
+    q_emb = embedder.encode(
+        [question],
+        convert_to_numpy=True,
+        normalize_embeddings=True
+    )
 
+    scores, idx = index.search(q_emb, k=5)
+
+    # ❌ NOT FOUND
     if scores[0][0] < 0.30:
         log_query(question, False)
         return (
             "- I checked the HR policy document, but this information is not mentioned.\n"
-            "- Please reach out to the HR team for clarification."
+            "- Please reach out to the HR team for further clarification."
         )
 
     context = "\n".join(
@@ -149,12 +167,12 @@ def answer_query(question):
 You are a professional HR assistant.
 
 Rules:
-- Answer ONLY from the HR policy
+- Answer ONLY using the policy content
 - Do NOT invent information
-- Use clear bullet points
-- 3 to 5 bullets only
+- Use 3 to 5 clear bullet points
+- Keep the language simple and professional
 
-Policy:
+Policy Content:
 {context}
 
 Question:
@@ -180,21 +198,21 @@ tabs = ["💬 Ask HR"]
 if st.session_state.role == "HR":
     tabs.append("📊 Admin Analytics")
 
-tab = st.tabs(tabs)
+tab_list = st.tabs(tabs)
 
 
 # ---------------- CHAT TAB ----------------
-with tab[0]:
-    st.subheader("Ask a Question")
-    q = st.text_input("Enter your HR policy question")
+with tab_list[0]:
+    st.subheader("💬 Ask HR Policy Question")
+    question = st.text_input("Enter your question")
 
-    if q:
-        st.success(answer_query(q))
+    if question:
+        st.success(answer_query(question))
 
 
-# ---------------- ADMIN ANALYTICS (HR ONLY) ----------------
+# ---------------- ADMIN ANALYTICS ----------------
 if st.session_state.role == "HR":
-    with tab[1]:
+    with tab_list[1]:
         st.subheader("📊 HR Admin Analytics")
 
         df = pd.read_csv(ANALYTICS_PATH)
@@ -214,7 +232,7 @@ if st.session_state.role == "HR":
 
         st.divider()
 
-        st.markdown("### ❌ Unanswered Queries")
+        st.markdown("### ❌ Unanswered Questions")
         st.dataframe(
             df[df["answered"] == False][["timestamp", "question"]],
             use_container_width=True
@@ -222,5 +240,5 @@ if st.session_state.role == "HR":
 
         st.divider()
 
-        st.markdown("### 📥 Full Query Log")
+        st.markdown("### 📁 Full Query Log")
         st.dataframe(df, use_container_width=True)
