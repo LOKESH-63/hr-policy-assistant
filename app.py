@@ -3,6 +3,8 @@ import faiss
 import numpy as np
 import os
 import re
+import pandas as pd
+from datetime import datetime
 from PIL import Image
 
 from sentence_transformers import SentenceTransformer
@@ -10,81 +12,105 @@ from transformers import AutoTokenizer, AutoModelForSeq2SeqLM, pipeline
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
+
 # ---------------- PAGE CONFIG ----------------
-st.set_page_config(page_title="HR Policy Chatbot", page_icon="🏢")
+st.set_page_config(page_title="HR Policy Assistant", page_icon="🏢", layout="wide")
 
-# ---------------- CONSTANTS ----------------
-PDF_FILE = "Sample_HR_Policy_Document.pdf"
-LOGO_FILE = "nexus_iq_logo.png"
 
+# ---------------- FILE PATHS ----------------
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-PDF_PATH = os.path.join(BASE_DIR, PDF_FILE)
-LOGO_PATH = os.path.join(BASE_DIR, LOGO_FILE)
+PDF_PATH = os.path.join(BASE_DIR, "Sample_HR_Policy_Document.pdf")
+LOGO_PATH = os.path.join(BASE_DIR, "nexus_iq_logo.png")
+ANALYTICS_PATH = os.path.join(BASE_DIR, "analytics.csv")
 
-# ---------------- LOGIN SYSTEM ----------------
+
+# ---------------- USERS ----------------
 USERS = {
     "employee": {"password": "employee123", "role": "Employee"},
     "hr": {"password": "hr123", "role": "HR"}
 }
 
+
+# ---------------- SESSION INIT ----------------
 if "logged_in" not in st.session_state:
     st.session_state.logged_in = False
 
+
+# ---------------- LOGIN ----------------
 def login():
     st.title("🔐 Login – HR Policy Assistant")
-    with st.form("login_form"):
-        username = st.text_input("Username")
-        password = st.text_input("Password", type="password")
+    with st.form("login"):
+        user = st.text_input("Username")
+        pwd = st.text_input("Password", type="password")
         submit = st.form_submit_button("Login")
 
     if submit:
-        if username.strip() in USERS and USERS[username.strip()]["password"] == password.strip():
+        if user in USERS and USERS[user]["password"] == pwd:
             st.session_state.logged_in = True
-            st.session_state.role = USERS[username.strip()]["role"]
+            st.session_state.role = USERS[user]["role"]
+            st.session_state.user = user
             st.rerun()
         else:
             st.error("Invalid credentials")
+
 
 if not st.session_state.logged_in:
     login()
     st.stop()
 
-# ---------------- HEADER ----------------
-if os.path.exists(LOGO_PATH):
-    logo = Image.open(LOGO_PATH)
-    col1, col2 = st.columns([1, 6])
-    with col1:
-        st.image(logo, width=65)
-    with col2:
-        st.markdown("## **Enterprise RAG-based HR Chatbot**")
-else:
-    st.markdown("## **Enterprise RAG-based HR Chatbot**")
 
-st.caption(f"Logged in as: **{st.session_state.role}**")
+# ---------------- HEADER ----------------
+col1, col2 = st.columns([1, 6])
+if os.path.exists(LOGO_PATH):
+    col1.image(Image.open(LOGO_PATH), width=70)
+col2.markdown("## **Enterprise RAG-Based HR Policy Assistant**")
+
+st.caption(f"Logged in as **{st.session_state.role}**")
 
 if st.button("Logout"):
     st.session_state.logged_in = False
     st.rerun()
 
-# ---------------- CHECK PDF ----------------
-if not os.path.exists(PDF_PATH):
-    st.error("❌ HR Policy PDF not found in repository root.")
-    st.stop()
 
-# ---------------- LOAD RAG PIPELINE ----------------
+# ---------------- LOAD ANALYTICS ----------------
+if not os.path.exists(ANALYTICS_PATH):
+    pd.DataFrame(
+        columns=["timestamp", "user", "role", "question", "answered"]
+    ).to_csv(ANALYTICS_PATH, index=False)
+
+
+def log_query(question, answered):
+    df = pd.read_csv(ANALYTICS_PATH)
+    df.loc[len(df)] = [
+        datetime.now(),
+        st.session_state.user,
+        st.session_state.role,
+        question,
+        answered
+    ]
+    df.to_csv(ANALYTICS_PATH, index=False)
+
+
+# ---------------- LOAD RAG ----------------
 @st.cache_resource
-def load_pipeline():
+def load_rag():
     loader = PyPDFLoader(PDF_PATH)
-    documents = loader.load()
+    docs = loader.load()
 
-    splitter = RecursiveCharacterTextSplitter(chunk_size=800, chunk_overlap=100)
-    chunks = splitter.split_documents(documents)
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=700,
+        chunk_overlap=120
+    )
+    chunks = splitter.split_documents(docs)
     texts = [c.page_content for c in chunks]
 
-    embedder = SentenceTransformer("BAAI/bge-base-en-v1.5")
+    embedder = SentenceTransformer(
+        "BAAI/bge-base-en-v1.5",
+        normalize_embeddings=True
+    )
     embeddings = embedder.encode(texts)
 
-    index = faiss.IndexFlatL2(embeddings.shape[1])
+    index = faiss.IndexFlatIP(embeddings.shape[1])
     index.add(np.array(embeddings))
 
     tokenizer = AutoTokenizer.from_pretrained("google/flan-t5-base")
@@ -93,77 +119,108 @@ def load_pipeline():
 
     return embedder, index, texts, llm
 
-embedder, index, texts, llm = load_pipeline()
+
+embedder, index, texts, llm = load_rag()
+
 
 # ---------------- HELPERS ----------------
-def is_greeting(text):
-    return text.lower().strip() in [
-        "hi", "hello", "hey",
-        "good morning", "good afternoon", "good evening"
-    ]
-
 def ensure_bullets(text):
-    lines = [l.strip() for l in text.splitlines() if l.strip()]
-    if lines and lines[0].startswith("-"):
-        return "\n".join(lines[:5])
-
     sentences = re.split(r"\.\s+", text)
     bullets = [f"- {s.strip()}" for s in sentences if len(s.strip()) > 5]
     return "\n".join(bullets[:5])
 
-# ---------------- RAG QUERY ----------------
+
 def answer_query(question):
-    q_emb = embedder.encode([question])
-    distances, idx = index.search(np.array(q_emb), k=5)
+    q_emb = embedder.encode([question], normalize_embeddings=True)
+    scores, idx = index.search(np.array(q_emb), k=5)
 
-    context = " ".join([texts[i] for i in idx[0][:3]])
+    if scores[0][0] < 0.30:
+        log_query(question, False)
+        return (
+            "- I checked the HR policy document, but this information is not mentioned.\n"
+            "- Please reach out to the HR team for clarification."
+        )
 
-    # Keyword fallback for section titles (e.g., Grievance)
-    if distances[0][0] > 1.6 and not any(
-        kw in context.lower() for kw in question.lower().split()
-    ):
-        return "- This information is not mentioned in the HR policy document."
+    context = "\n".join(
+        [texts[i] for i, s in zip(idx[0], scores[0]) if s > 0.30][:3]
+    )
 
     prompt = f"""
-You are an HR assistant.
+You are a professional HR assistant.
 
-Answer ONLY in clear bullet points.
-Do NOT copy policy clauses word by word.
-Use professional, simple language.
-Limit to 3–5 short bullet points.
+Rules:
+- Answer ONLY from the HR policy
+- Do NOT invent information
+- Use clear bullet points
+- 3 to 5 bullets only
 
-Policy Content:
+Policy:
 {context}
 
 Question:
 {question}
 
-Format:
-- Point 1
-- Point 2
-- Point 3
+Answer:
 """
 
-    raw = llm(prompt, max_length=160, temperature=0.1)[0]["generated_text"]
-    clean = ensure_bullets(raw)
+    response = llm(
+        prompt,
+        max_length=180,
+        temperature=0.0,
+        do_sample=False
+    )[0]["generated_text"]
 
-    if clean.lower().strip() in ["- point 1", "point 1", ""]:
-        return "- This information is not mentioned in the HR policy document."
-
+    clean = ensure_bullets(response)
+    log_query(question, True)
     return clean
 
-# ---------------- CHAT UI ----------------
-st.subheader("💬 Ask HR Policy Question")
-question = st.text_input("Enter your question")
 
-if question:
-    if is_greeting(question):
-        st.info(
-            "Hello 👋 I’m your HR Policy Assistant.\n\n"
-            "You can ask:\n"
-            "- What is the leave policy?\n"
-            "- What is the WFH policy?\n"
-            "- What is the Grievance Redressal Policy?"
+# ---------------- UI TABS ----------------
+tabs = ["💬 Ask HR"]
+if st.session_state.role == "HR":
+    tabs.append("📊 Admin Analytics")
+
+tab = st.tabs(tabs)
+
+
+# ---------------- CHAT TAB ----------------
+with tab[0]:
+    st.subheader("Ask a Question")
+    q = st.text_input("Enter your HR policy question")
+
+    if q:
+        st.success(answer_query(q))
+
+
+# ---------------- ADMIN ANALYTICS (HR ONLY) ----------------
+if st.session_state.role == "HR":
+    with tab[1]:
+        st.subheader("📊 HR Admin Analytics")
+
+        df = pd.read_csv(ANALYTICS_PATH)
+
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Total Questions", len(df))
+        col2.metric("Answered", df["answered"].sum())
+        col3.metric("Unanswered", len(df) - df["answered"].sum())
+
+        st.divider()
+
+        st.markdown("### 🔥 Top Asked Questions")
+        st.dataframe(
+            df["question"].value_counts().head(5).reset_index(),
+            use_container_width=True
         )
-    else:
-        st.success(answer_query(question))
+
+        st.divider()
+
+        st.markdown("### ❌ Unanswered Queries")
+        st.dataframe(
+            df[df["answered"] == False][["timestamp", "question"]],
+            use_container_width=True
+        )
+
+        st.divider()
+
+        st.markdown("### 📥 Full Query Log")
+        st.dataframe(df, use_container_width=True)
