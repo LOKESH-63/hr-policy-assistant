@@ -1,3 +1,4 @@
+import os
 import streamlit as st
 import pandas as pd
 from PIL import Image
@@ -33,13 +34,26 @@ def login():
 if not st.session_state.logged_in:
     login()
     st.stop()
+    
+# ---------------- HEADER ----------------
+st.markdown("## 🏢 HR Policy Assistant")
 
-
-# -------- HEADER --------
-if LOGO_PATH:
-    st.image(Image.open(LOGO_PATH), width=80)
+# Safely load logo (prevents FileNotFoundError)
+if os.path.exists(LOGO_PATH):
+    try:
+        st.image(Image.open(LOGO_PATH), width=80)
+    except Exception:
+        st.warning("⚠️ Unable to load company logo.")
+else:
+    st.warning("⚠️ Company logo not found in repository.")
 
 st.caption(f"Logged in as **{st.session_state.role}**")
+
+# Logout button
+if st.button("Logout"):
+    st.session_state.logged_in = False
+    st.rerun()
+
 
 # -------- INIT --------
 init_analytics()
